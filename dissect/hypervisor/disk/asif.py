@@ -175,7 +175,7 @@ class Directory:
         self.asif.fh.seek(self.offset + 8)
         return c_asif.uint64[self.asif._num_tables](self.asif.fh)
 
-    def table(self, index: int) -> Table:
+    def table(self, index: int) -> Table | None:
         """Get a table from the directory.
 
         Args:
@@ -183,7 +183,11 @@ class Directory:
         """
         if index >= self.asif._num_tables:
             raise IndexError("Table index out of range")
-        return Table(self.asif, index, self.entries[index] * self.asif.chunk_size)
+
+        if (entry := self.entries[index]) == 0:
+            return None
+
+        return Table(self.asif, index, entry * self.asif.chunk_size)
 
 
 class Table:
@@ -251,25 +255,27 @@ class DataStream(AlignedStream):
     def _read(self, offset: int, length: int) -> bytes:
         result = []
         while length:
-            table = self.directory.table(offset // self.asif._size_per_table)
-
-            # Calculate the relative chunk index within the table
-            relative_block_index = (offset // self.asif.block_size) - (table.virtual_offset // self.asif.block_size)
-            relative_chunk_index = relative_block_index // self.asif._blocks_per_chunk
-
-            # Calculate the chunk group
-            chunk_group = relative_chunk_index // self.asif._num_chunks_per_group
-            # Each chunk group has a bitmap entry, so we need to account for that in the entry index
-            entry_index = relative_chunk_index + chunk_group
-
-            chunk = table.entries[entry_index] & 0x7FFFFFFFFFFFFF
-
-            read_length = min(length, self.asif.chunk_size)
-            if chunk == 0:
+            if (table := self.directory.table(offset // self.asif._size_per_table)) is None:
+                read_length = min(length, self.asif._size_per_table)
                 result.append(b"\x00" * read_length)
             else:
-                self.asif.fh.seek(chunk * self.asif.chunk_size)
-                result.append(self.asif.fh.read(read_length))
+                # Calculate the relative chunk index within the table
+                relative_block_index = (offset // self.asif.block_size) - (table.virtual_offset // self.asif.block_size)
+                relative_chunk_index = relative_block_index // self.asif._blocks_per_chunk
+
+                # Calculate the chunk group
+                chunk_group = relative_chunk_index // self.asif._num_chunks_per_group
+                # Each chunk group has a bitmap entry, so we need to account for that in the entry index
+                entry_index = relative_chunk_index + chunk_group
+
+                chunk = table.entries[entry_index] & 0x7FFFFFFFFFFFFF
+
+                read_length = min(length, self.asif.chunk_size)
+                if chunk == 0:
+                    result.append(b"\x00" * read_length)
+                else:
+                    self.asif.fh.seek(chunk * self.asif.chunk_size)
+                    result.append(self.asif.fh.read(read_length))
 
             offset += read_length
             length -= read_length
